@@ -43,7 +43,8 @@ class FreeBSDVM(basevm.BaseVM):
                          --extra-cflags=-I/usr/local/include \
                          --enable-rust \
                          {configure_opts};
-        gmake --output-sync -j{jobs} {target} {verbose} || gmake --output-sync -j{jobs} {target} {verbose} || gmake --output-sync -j{jobs} {target} {verbose};
+        gmake -j{jobs} check-build || gmake -j{jobs} check-build || gmake -j{jobs} check-build;
+        gmake --output-sync -j{jobs} {target} {verbose};
     """
 
     def build_image(self, img):
