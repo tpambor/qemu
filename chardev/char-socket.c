@@ -36,6 +36,7 @@
 #include "trace.h"
 
 #include "chardev/char-io.h"
+#include "chardev/char-fe.h"
 #include "chardev/char-socket.h"
 
 static gboolean socket_reconnect_timeout(gpointer opaque);
@@ -515,11 +516,31 @@ static gboolean tcp_chr_read(QIOChannel *chan, GIOCondition cond, void *opaque)
     return TRUE;
 }
 
+static void add_hup_source(SocketChardev *s, GIOCondition cond);
+
 static gboolean tcp_chr_hup(QIOChannel *channel,
                                GIOCondition cond,
                                void *opaque)
 {
     Chardev *chr = CHARDEV(opaque);
+#ifndef _WIN32
+    SocketChardev *s = SOCKET_CHARDEV(opaque);
+
+    if (!(cond & G_IO_HUP)) {
+        /* Readable while nobody reads: only EOF counts as a hang-up. */
+        char c;
+        ssize_t n = recv(s->sioc->fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+
+        if (n < 0 && (errno == EAGAIN || errno == EINTR)) {
+            return G_SOURCE_CONTINUE;
+        }
+        if (n > 0) {
+            /* Data nobody will read: stop watching for it, or we spin. */
+            add_hup_source(s, G_IO_HUP);
+            return G_SOURCE_REMOVE;
+        }
+    }
+#endif
     trace_chr_socket_hangup(chr, chr->label);
     tcp_chr_disconnect(chr);
     return G_SOURCE_REMOVE;
@@ -611,8 +632,25 @@ static void update_ioc_handlers(SocketChardev *s)
                                      tcp_chr_read, chr,
                                      chr->gcontext);
 
+    /*
+     * A G_IO_HUP-only poll() is not woken by a peer close on FreeBSD
+     * (no wakeup is registered without read/write interest) nor
+     * reliably on macOS.  While nobody reads, ask for G_IO_IN too and
+     * let tcp_chr_hup tell EOF from data.
+     */
+    add_hup_source(s, G_IO_HUP |
+                   (chr->fe && chr->fe->chr_can_read ? 0 : G_IO_IN));
+}
+
+static void add_hup_source(SocketChardev *s, GIOCondition cond)
+{
+    Chardev *chr = CHARDEV(s);
+
+#ifdef _WIN32
+    cond = G_IO_HUP;
+#endif
     remove_hup_source(s);
-    s->hup_source = qio_channel_create_watch(s->ioc, G_IO_HUP);
+    s->hup_source = qio_channel_create_watch(s->ioc, cond);
     /*
      * poll() is liable to return POLLHUP even when there is
      * still incoming data available to read on the FD. If
