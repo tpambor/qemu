@@ -128,9 +128,6 @@ static int vhost_user_start(int queues, NetClientState *ncs[],
 
     options.backend_type = VHOST_BACKEND_TYPE_USER;
 
-    fprintf(stderr, "VU %" PRId64 " net: vhost_user_start\n", g_get_monotonic_time());
-    be->disconnected = false;
-
     for (i = 0; i < queues; i++) {
         assert(ncs[i]->info->type == NET_CLIENT_DRIVER_VHOST_USER);
 
@@ -307,22 +304,14 @@ static void chr_closed_bh(void *opaque)
 
     s = DO_UPCAST(NetVhostUserState, nc, ncs[0]);
 
-    fprintf(stderr, "VU %" PRId64 " net: chr_closed_bh begin (backend_open=%d)\n",
-            g_get_monotonic_time(), qemu_chr_fe_backend_open(&s->chr));
-
     for (i = queues -1; i >= 0; i--) {
         vhost_user_save_acked_features(ncs[i]);
     }
 
     net_client_set_link(ncs, queues, false);
 
-    fprintf(stderr, "VU %" PRId64 " net: chr_closed_bh link down done, reinstalling handlers\n",
-            g_get_monotonic_time());
-
     qemu_chr_fe_set_handlers(&s->chr, NULL, NULL, net_vhost_user_event,
                              NULL, opaque, NULL, true);
-
-    fprintf(stderr, "VU %" PRId64 " net: chr_closed_bh end\n", g_get_monotonic_time());
 
     qapi_event_send_netdev_vhost_user_disconnected(name);
 }
@@ -343,8 +332,6 @@ static void net_vhost_user_event(void *opaque, QEMUChrEvent event)
     s = DO_UPCAST(NetVhostUserState, nc, ncs[0]);
     chr = qemu_chr_fe_get_driver(&s->chr);
     trace_vhost_user_event(chr->label, event);
-    fprintf(stderr, "VU %" PRId64 " net: event %d (watch=%u, backend_open=%d)\n",
-            g_get_monotonic_time(), event, s->watch, qemu_chr_fe_backend_open(&s->chr));
     switch (event) {
     case CHR_EVENT_OPENED:
         if (vhost_user_start(queues, ncs, s->vhost_user) < 0) {
@@ -365,10 +352,6 @@ static void net_vhost_user_event(void *opaque, QEMUChrEvent event)
          */
         if (s->watch) {
             AioContext *ctx = qemu_get_current_aio_context();
-
-            /* Local experiment: never let the old device's teardown talk to
-             * whatever client the chardev accepts next. */
-            s->vhost_user->disconnected = true;
 
             g_clear_handle_id(&s->watch, g_source_remove);
             qemu_chr_fe_set_handlers(&s->chr, NULL, NULL, NULL, NULL,

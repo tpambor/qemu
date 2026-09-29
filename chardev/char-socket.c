@@ -464,8 +464,6 @@ static void tcp_chr_disconnect_locked(Chardev *chr)
     bool emit_close = s->state == TCP_CHARDEV_STATE_CONNECTED;
 
     trace_chr_socket_disconnect(chr, chr->label);
-    fprintf(stderr, "CHR %" PRId64 " %s disconnect (was_connected=%d)\n",
-            g_get_monotonic_time(), chr->label, emit_close);
     tcp_chr_free_connection(chr);
 
     if (s->listener) {
@@ -518,32 +516,120 @@ static gboolean tcp_chr_read(QIOChannel *chan, GIOCondition cond, void *opaque)
     return TRUE;
 }
 
+static void add_hup_source(SocketChardev *s, GIOCondition cond);
+
+#ifndef _WIN32
+/*
+ * Non-blocking peek at the client socket.
+ * Returns 1 if the peer has closed the connection (or the socket is in
+ * error), 0 if there is data queued, -1 if there is nothing to read.
+ */
+static int tcp_chr_peek(SocketChardev *s)
+{
+    int flags = MSG_PEEK;
+    ssize_t n;
+    char c;
+
+#ifdef MSG_DONTWAIT
+    flags |= MSG_DONTWAIT;
+#endif
+    do {
+        n = recv(s->sioc->fd, &c, 1, flags);
+    } while (n < 0 && errno == EINTR);
+
+    if (n > 0) {
+        return 0;
+    }
+    if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+        return -1;
+    }
+    return 1;
+}
+#endif
+
+/*
+ * Which conditions the hang-up watch should ask for.
+ *
+ * A watch for G_IO_HUP alone is not a portable way to notice that the
+ * peer went away: Linux wakes such a poll() when the peer closes, but
+ * FreeBSD only registers a wakeup for read/write interest, and macOS
+ * drops its one-shot read filter on any non-EOF event, so as long as
+ * nobody polls the socket for readability the hang-up is not seen
+ * until something unrelated wakes the main loop.  Frontends that never
+ * read from the chardev (e.g. vhost-user, which reads its replies
+ * synchronously) are exactly the ones with no G_IO_IN watch.
+ *
+ * So while the frontend has no read handler at all, also ask for
+ * G_IO_IN and treat EOF as a hang-up.  tcp_chr_hup drops G_IO_IN
+ * again if data arrives that nobody will read, so this cannot spin;
+ * that case then simply keeps today's G_IO_HUP-only behaviour.
+ */
+static GIOCondition tcp_chr_hup_condition(Chardev *chr)
+{
+#ifndef _WIN32
+    if (!chr->fe || !chr->fe->chr_can_read) {
+        return G_IO_HUP | G_IO_IN;
+    }
+#endif
+    return G_IO_HUP;
+}
+
 static gboolean tcp_chr_hup(QIOChannel *channel,
                                GIOCondition cond,
                                void *opaque)
 {
     Chardev *chr = CHARDEV(opaque);
+    SocketChardev *s = SOCKET_CHARDEV(opaque);
 
+#ifndef _WIN32
     if (!(cond & G_IO_HUP)) {
         /*
-         * Woken for readability only (see update_ioc_handlers): only
-         * treat it as a hang-up if the peer really closed (EOF).
+         * Woken for readability while nobody reads (see
+         * tcp_chr_hup_condition): only a peer close counts.
          */
-        SocketChardev *s = SOCKET_CHARDEV(chr);
-        QIOChannelSocket *sioc = QIO_CHANNEL_SOCKET(s->ioc);
-        char c;
-        ssize_t n = recv(sioc->fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
-        if (n != 0) {
+        switch (tcp_chr_peek(s)) {
+        case 0:
+            /* Data nobody will read: watching for it would spin. */
+            add_hup_source(s, G_IO_HUP);
+            return G_SOURCE_REMOVE;
+        case -1:
             return G_SOURCE_CONTINUE;
+        default:
+            break;
         }
-        fprintf(stderr, "CHR %" PRId64 " %s EOF detected via readability\n",
-                g_get_monotonic_time(), chr->label);
     }
+#endif
+
     trace_chr_socket_hangup(chr, chr->label);
-    fprintf(stderr, "CHR %" PRId64 " %s hangup source fired (cond=%d)\n",
-            g_get_monotonic_time(), chr->label, cond);
     tcp_chr_disconnect(chr);
     return G_SOURCE_REMOVE;
+}
+
+static void add_hup_source(SocketChardev *s, GIOCondition cond)
+{
+    Chardev *chr = CHARDEV(s);
+
+    remove_hup_source(s);
+    s->hup_source = qio_channel_create_watch(s->ioc, cond);
+    /*
+     * poll() is liable to return POLLHUP even when there is
+     * still incoming data available to read on the FD. If
+     * we have the hup_source at the same priority as the
+     * main io_add_watch_poll GSource, then we might end up
+     * processing the POLLHUP event first, closing the FD,
+     * and as a result silently discard data we should have
+     * read.
+     *
+     * By setting the hup_source to G_PRIORITY_DEFAULT + 1,
+     * we ensure that io_add_watch_poll GSource will always
+     * be dispatched first, thus guaranteeing we will be
+     * able to process all incoming data before closing the
+     * FD
+     */
+    g_source_set_priority(s->hup_source, G_PRIORITY_DEFAULT + 1);
+    g_source_set_callback(s->hup_source, (GSourceFunc)tcp_chr_hup,
+                          chr, NULL);
+    g_source_attach(s->hup_source, chr->gcontext);
 }
 
 static int tcp_chr_sync_read(Chardev *chr, const uint8_t *buf, int len)
@@ -632,45 +718,7 @@ static void update_ioc_handlers(SocketChardev *s)
                                      tcp_chr_read, chr,
                                      chr->gcontext);
 
-    remove_hup_source(s);
-    {
-        GIOCondition hup_cond = G_IO_HUP;
-#ifndef CONFIG_LINUX
-        /*
-         * Local experiment (not for upstream): on FreeBSD, poll() only
-         * registers a wakeup (selrecord) for read/write interest, so a
-         * watch that asks for G_IO_HUP alone is never woken when the
-         * peer closes the connection.  When the frontend has no reader
-         * (e.g. vhost-user after CHR_EVENT_CLOSED cleared its handlers)
-         * nobody polls the fd for readability, and the hang-up goes
-         * unnoticed until an unrelated event wakes the main loop.  Ask
-         * for readability too in that case; tcp_chr_hup checks for EOF.
-         */
-        if (!chr->fe || !chr->fe->chr_can_read) {
-            hup_cond |= G_IO_IN;
-        }
-#endif
-        s->hup_source = qio_channel_create_watch(s->ioc, hup_cond);
-    }
-    /*
-     * poll() is liable to return POLLHUP even when there is
-     * still incoming data available to read on the FD. If
-     * we have the hup_source at the same priority as the
-     * main io_add_watch_poll GSource, then we might end up
-     * processing the POLLHUP event first, closing the FD,
-     * and as a result silently discard data we should have
-     * read.
-     *
-     * By setting the hup_source to G_PRIORITY_DEFAULT + 1,
-     * we ensure that io_add_watch_poll GSource will always
-     * be dispatched first, thus guaranteeing we will be
-     * able to process all incoming data before closing the
-     * FD
-     */
-    g_source_set_priority(s->hup_source, G_PRIORITY_DEFAULT + 1);
-    g_source_set_callback(s->hup_source, (GSourceFunc)tcp_chr_hup,
-                          chr, NULL);
-    g_source_attach(s->hup_source, chr->gcontext);
+    add_hup_source(s, tcp_chr_hup_condition(chr));
 }
 
 static void tcp_chr_connect(void *opaque)
@@ -929,9 +977,6 @@ static int tcp_chr_new_client(Chardev *chr, QIOChannelSocket *sioc)
 {
     SocketChardev *s = SOCKET_CHARDEV(chr);
     Error *local_err = NULL;
-
-    fprintf(stderr, "CHR %" PRId64 " %s new client (state=%d)\n",
-            g_get_monotonic_time(), chr->label, s->state);
 
     if (s->state != TCP_CHARDEV_STATE_CONNECTING) {
         return -1;
