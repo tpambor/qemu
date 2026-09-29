@@ -35,7 +35,7 @@ class FreeBSDVM(basevm.BaseVM):
     BUILD_SCRIPT = """
         set -e;
         unset https_proxy http_proxy HTTPS_PROXY HTTP_PROXY;
-        export PIP_CERT=/usr/local/etc/ssl/sandbox-bundle.pem SSL_CERT_FILE=/usr/local/etc/ssl/sandbox-bundle.pem;
+        export PIP_CERT=/usr/local/etc/ssl/certs/sandbox-ca.pem SSL_CERT_FILE=/usr/local/etc/ssl/certs/sandbox-ca.pem;
         rm -rf /home/qemu/qemu-test.*
         cd $(mktemp -d /home/qemu/qemu-test.XXXXXX);
         mkdir src build; cd src;
