@@ -463,6 +463,8 @@ static void tcp_chr_disconnect_locked(Chardev *chr)
     bool emit_close = s->state == TCP_CHARDEV_STATE_CONNECTED;
 
     trace_chr_socket_disconnect(chr, chr->label);
+    fprintf(stderr, "CHR %" PRId64 " %s disconnect (was_connected=%d)\n",
+            g_get_monotonic_time(), chr->label, emit_close);
     tcp_chr_free_connection(chr);
 
     if (s->listener) {
@@ -521,6 +523,8 @@ static gboolean tcp_chr_hup(QIOChannel *channel,
 {
     Chardev *chr = CHARDEV(opaque);
     trace_chr_socket_hangup(chr, chr->label);
+    fprintf(stderr, "CHR %" PRId64 " %s hangup source fired\n",
+            g_get_monotonic_time(), chr->label);
     tcp_chr_disconnect(chr);
     return G_SOURCE_REMOVE;
 }
@@ -890,6 +894,9 @@ static int tcp_chr_new_client(Chardev *chr, QIOChannelSocket *sioc)
 {
     SocketChardev *s = SOCKET_CHARDEV(chr);
     Error *local_err = NULL;
+
+    fprintf(stderr, "CHR %" PRId64 " %s new client (state=%d)\n",
+            g_get_monotonic_time(), chr->label, s->state);
 
     if (s->state != TCP_CHARDEV_STATE_CONNECTING) {
         return -1;
