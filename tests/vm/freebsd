@@ -117,6 +117,21 @@ class FreeBSDVM(basevm.BaseVM):
         self.console_send("echo 'chmod 666 /dev/vtbd1' >> /etc/rc.local\n")
 
         pkgs = self.get_qemu_packages_from_lcitool_json()
+
+        # Local experiment only: this sandbox re-terminates the guest's TLS
+        # at its egress gateway, so install that CA into the guest trust
+        # store (see /root/.ccr/README.md) before fetching packages.
+        extra_ca = os.environ.get("QEMU_VM_EXTRA_CA")
+        if extra_ca:
+            import base64
+            self.print_step("Installing extra CA certificates")
+            b64 = base64.b64encode(open(extra_ca, "rb").read()).decode()
+            self.ssh_root_check(
+                "mkdir -p /usr/local/etc/ssl/certs && "
+                "echo %s | openssl base64 -d -A > /usr/local/etc/ssl/certs/sandbox-ca.pem && "
+                "certctl rehash && "
+                "{ test -f /etc/ssl/cert.pem && cat /usr/local/etc/ssl/certs/sandbox-ca.pem >> /etc/ssl/cert.pem; true; }\n" % b64)
+
         self.print_step("Installing packages")
         self.ssh_root_check("pkg install -y %s\n" % " ".join(pkgs))
 
