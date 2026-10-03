@@ -360,6 +360,7 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
         }
     }
 
+    g_printerr("TEST rx req=%u size=%u\n", msg.request, msg.size);
     switch (msg.request) {
     case VHOST_USER_GET_FEATURES:
         /* Mandatory for tests to define get_features */
@@ -453,6 +454,9 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
         memcpy(&s->memory, &msg.payload.memory, sizeof(msg.payload.memory));
         s->fds_num = qemu_chr_fe_get_msgfds(chr, s->fds,
                                             G_N_ELEMENTS(s->fds));
+        /* local experiment: diagnostics */
+        g_printerr("TEST SET_MEM_TABLE nregions=%u fds_num=%d\n",
+                   s->memory.nregions, s->fds_num);
 
         /* signal the test that it can continue */
         g_cond_broadcast(&s->data_cond);
