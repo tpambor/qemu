@@ -28,6 +28,7 @@ BOOT_TIMEOUT=${BOOT_TIMEOUT:-1800}   # until KILL_AT writers are done
 RESUME_TIMEOUT=${RESUME_TIMEOUT:-300} # from the back-end restart to power-off
 KILL_AT=${KILL_AT:-5}                 # kill the back-end once this many writers are done
 WRITERS=${WRITERS:-150}               # concurrent O_DIRECT writers (virtqueue has 128 entries)
+QEMU_EXTRA_ARGS=${QEMU_EXTRA_ARGS:-}  # e.g. "-msg timestamp=on -trace vhost_user_blk_*"
 
 mkdir -p "$LOGS"
 cd "$LOGS" || exit 1
@@ -101,7 +102,7 @@ start=$(date +%s)
     -device vhost-user-blk-pci,num-queues=1,chardev=char0 \
     -chardev socket,id=char0,path=$SOCK,reconnect-ms=500 \
     -cpu max -nic none -cdrom seed.iso -display none -no-reboot \
-    -serial file:serial.log > qemu.log 2>&1 &
+    -serial file:serial.log $QEMU_EXTRA_ARGS > qemu.log 2>&1 &
 QEMU_PID=$!
 
 wait_done() { # count timeout: wait until at least $1 writers printed DONE
@@ -120,12 +121,12 @@ if ! wait_done "$KILL_AT" "$BOOT_TIMEOUT"; then
     kill $QSD_PID 2>/dev/null; wait $QSD_PID 2>/dev/null
     cat qemu.log; echo "RESULT: FAIL" | tee summary.txt; exit 1
 fi
-echo "$(grep -a -c '^DONE ' serial.log) writers done after $(( $(date +%s) - start ))s; killing the back-end (pid $QSD_PID)"
+echo "$(date +%s.%N | cut -c1-14) $(grep -a -c '^DONE ' serial.log) writers done after $(( $(date +%s) - start ))s; killing the back-end (pid $QSD_PID)"
 kill -9 $QSD_PID; wait $QSD_PID 2>/dev/null
 sleep 3
 done_before=$(grep -a -c '^DONE ' serial.log)
 echo "writers done before the restart: $done_before/$WRITERS"
-echo "== restarting qemu-storage-daemon"
+echo "$(date +%s.%N | cut -c1-14) == restarting qemu-storage-daemon"
 start_qsd || exit 1
 restart=$(date +%s)
 
@@ -135,7 +136,7 @@ if kill -0 $QEMU_PID 2>/dev/null; then
     kill $QEMU_PID
 fi
 rc=0; wait $QEMU_PID || rc=$?
-echo "qemu exit status $rc, $(( $(date +%s) - restart ))s after the restart, $(( $(date +%s) - start ))s total"
+echo "$(date +%s.%N | cut -c1-14) qemu exit status $rc, $(( $(date +%s) - restart ))s after the restart, $(( $(date +%s) - start ))s total"
 kill $QSD_PID 2>/dev/null; wait $QSD_PID 2>/dev/null
 
 echo "--- qemu.log"; cat qemu.log
