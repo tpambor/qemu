@@ -36,10 +36,13 @@ jobs:
           HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
         run: |
           brew update
-          # the runner image links openssl@1.1; openssl@3 (pulled in by python3)
-          # cannot link over it and brew exits non-zero on that
-          brew unlink openssl@1.1 2>/dev/null || true
-          brew install bash coreutils dtc gettext glib gnu-sed make meson ninja pixman pkgconf python3 zstd
+          # The runner image has a stale /opt/homebrew/bin/openssl symlink into
+          # openssl@1.1 that "brew unlink openssl@1.1" does not know about, so
+          # the openssl@3 upgrade (pulled in by python3) fails its link step and
+          # brew exits non-zero although everything is installed.  Force the
+          # link and finish the install in that case.
+          pkgs="bash coreutils dtc gettext glib gnu-sed make meson ninja pixman pkgconf python3 zstd"
+          brew install $pkgs || { brew link --overwrite openssl@3; brew install $pkgs; }
 
       - name: Install dependencies (Ubuntu)
         if: runner.os == 'Linux'
