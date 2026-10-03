@@ -51,7 +51,10 @@ jobs:
         run: |
           mkdir build
           cd build
+          prefix=$(brew --prefix)
           ../configure \
+            --extra-cflags="-I$prefix/include" \
+            --extra-ldflags="-L$prefix/lib" \
             --target-list=ppc64-softmmu \
             --enable-vhost-user \
             --disable-virtfs \
@@ -118,7 +121,7 @@ jobs:
             fi
             echo
             echo '```'
-            grep -h -E 'vhost-user/reconnect|^Ok:|^Fail:|^Timeout:|Summary of Failures|qos-test +(OK|ERROR|FAIL|TIMEOUT)' stress.log || true
+            grep -h -E 'vhost-user/reconnect|^Ok:|^Fail:|^Timeout:|Summary of Failures|qos-test +(OK|ERROR|FAIL|TIMEOUT)' stress.log 2>/dev/null || true
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           grep -rl 'wait_for_fds: assertion failed' stress.log loop-*.log build/meson-logs 2>/dev/null || true
