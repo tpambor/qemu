@@ -111,7 +111,7 @@ start=$(date +%s)
     -serial file:serial.log > qemu.log 2>&1 &
 QEMU_PID=$!
 
-if ! wait_serial "^ITER $KILL_AT\$" "$BOOT_TIMEOUT"; then
+if ! wait_serial "^ITER $KILL_AT([^0-9]|$)" "$BOOT_TIMEOUT"; then
     echo "FAIL: guest did not reach ITER $KILL_AT within ${BOOT_TIMEOUT}s"
     kill $QEMU_PID 2>/dev/null; wait $QEMU_PID 2>/dev/null
     kill $QSD_PID 2>/dev/null; wait $QSD_PID 2>/dev/null
