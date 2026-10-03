@@ -2,13 +2,14 @@
 #
 # Try to reproduce the vhost-user/reconnect qtest failure
 #   ERROR:tests/qtest/vhost-user-test.c:wait_for_fds: assertion failed: (s->fds_num)
-# on macOS.  On FreeBSD it reproduces reliably when six qtests run in
-# parallel (make -j6 check-qtest-ppc64 MTESTARGS="--repeat 5 ..."), and the
-# cause is the socket chardev's G_IO_HUP-only watch not being woken when the
-# vhost-user backend closes its side.  This job repeats that recipe on the
-# GitHub macOS runners and reports whether the assertion showed up.
+# on macOS and Linux.  On FreeBSD it reproduces reliably when six qtests run
+# in parallel (make -j6 check-qtest-ppc64 MTESTARGS="--repeat 5 ..."), and
+# the cause is the socket chardev's G_IO_HUP-only watch not being woken when
+# the vhost-user backend closes its side.  This job repeats that recipe on
+# the GitHub macOS (Apple silicon) and Ubuntu runners and reports whether the
+# assertion showed up.
 
-name: macOS vhost-user reconnect repro
+name: vhost-user reconnect repro (macOS and Ubuntu)
 
 on:
   push:
@@ -21,7 +22,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15]
+        os: [macos-15, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 330
     env:
@@ -40,23 +41,44 @@ jobs:
 
       - name: Host info
         run: |
-          sw_vers
           uname -a
-          sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string
+          if [ "$RUNNER_OS" = macOS ]; then
+            sw_vers
+            sysctl -n hw.ncpu hw.memsize machdep.cpu.brand_string
+            echo "NCPU=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
+            echo "MAKE=gmake" >> "$GITHUB_ENV"
+          else
+            cat /etc/os-release | head -2
+            nproc; free -g | head -2
+            echo "NCPU=$(nproc)" >> "$GITHUB_ENV"
+            echo "MAKE=make" >> "$GITHUB_ENV"
+          fi
 
-      - name: Install dependencies
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
         run: |
           brew update
           brew install bash coreutils dtc gettext glib gnu-sed make meson ninja pixman pkgconf python3
+
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev libfdt-dev zlib1g-dev \
+            libcap-ng-dev libattr1-dev
 
       - name: Configure
         run: |
           mkdir build
           cd build
-          prefix=$(brew --prefix)
-          ../configure \
-            --extra-cflags="-I$prefix/include" \
-            --extra-ldflags="-L$prefix/lib" \
+          extra=""
+          if [ "$RUNNER_OS" = macOS ]; then
+            prefix=$(brew --prefix)
+            extra="--extra-cflags=-I$prefix/include --extra-ldflags=-L$prefix/lib"
+          fi
+          ../configure $extra \
             --target-list=ppc64-softmmu \
             --enable-vhost-user \
             --enable-vhost-user-blk-server \
@@ -67,10 +89,10 @@ jobs:
             || { cat config.log meson-logs/meson-log.txt; exit 1; }
 
       - name: Build
-        run: cd build && gmake -j$(sysctl -n hw.ncpu)
+        run: cd build && $MAKE -j$NCPU
 
       - name: Build tests
-        run: cd build && gmake -j$(sysctl -n hw.ncpu) check-build
+        run: cd build && $MAKE -j$NCPU check-build
 
       - name: All qos tests (unloaded, once, no arguments)
         id: virtio
@@ -94,16 +116,15 @@ jobs:
         continue-on-error: true
         run: |
           cd build
-          gmake -j6 check-qtest-ppc64 MTESTARGS="--repeat 5 $PPC64_TESTS" 2>&1 | tee ../stress.log
+          $MAKE -j6 check-qtest-ppc64 MTESTARGS="--repeat 5 $PPC64_TESTS" 2>&1 | tee ../stress.log
 
       - name: Reconnect loop under CPU load
         id: loop
         continue-on-error: true
         run: |
           cd build
-          n=$(sysctl -n hw.ncpu)
           hogs=""
-          for i in $(seq 1 $((n * 2))); do yes > /dev/null & hogs="$hogs $!"; done
+          for i in $(seq 1 $((NCPU * 2))); do yes > /dev/null & hogs="$hogs $!"; done
           fails=0
           for i in $(seq 1 30); do
             if QTEST_QEMU_BINARY=./qemu-system-ppc64 QTEST_QEMU_IMG=./qemu-img \
