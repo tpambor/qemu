@@ -336,7 +336,7 @@ jobs:
         uses: cross-platform-actions/action@v0.28.0
         with:
           operating_system: openbsd
-          version: '7.6'
+          version: '7.7'
           architecture: x86-64
           cpu_count: 4
           memory: 12G
@@ -350,11 +350,11 @@ jobs:
             uname -a; uname -r; echo "cpus: $NCPU"
             mkdir -p openbsd-logs
             SUDO=sudo; command -v sudo >/dev/null 2>&1 || SUDO=doas
-            # QEMU needs Python >= 3.12; OpenBSD 7.6's default python3 is 3.11
-            $SUDO pkg_add -I bash bison bzip2 dtc git glib2 gmake gsed libffi meson ninja pkgconf python%3.12
+            # OpenBSD 7.7's default python3 is 3.12 (QEMU needs >= 3.12)
+            $SUDO pkg_add -I bash bison bzip2 dtc git glib2 gmake gsed libffi meson ninja pkgconf python3
             export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/X11R6/lib/pkgconfig
             mkdir build && cd build
-            ../configure --cc=cc --python=/usr/local/bin/python3.12 \
+            ../configure --cc=cc --python=/usr/local/bin/python3 \
               --extra-cflags="-I/usr/local/include -I/usr/X11R6/include" \
               --extra-ldflags="-L/usr/local/lib -L/usr/X11R6/lib" \
               --target-list=ppc64-softmmu \
@@ -393,7 +393,7 @@ jobs:
         if: always()
         run: |
           {
-            echo "## vhost-user/reconnect on OpenBSD 7.6 (VM on ${{ runner.os }})"
+            echo "## vhost-user/reconnect on OpenBSD 7.7 (VM on ${{ runner.os }})"
             echo
             echo "VM step outcome: ${{ steps.vm.outcome }}"
             cat openbsd-logs/loop-summary.txt 2>/dev/null || echo "loop: no result"
@@ -432,7 +432,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-openbsd-7.6
+          name: logs-openbsd-7.7
           path: openbsd-logs/
           if-no-files-found: ignore
 
