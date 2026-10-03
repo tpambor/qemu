@@ -520,9 +520,22 @@ static bool qio_channel_handle_fds(int *fds, size_t nfds,
         }
 
         if (!preserve_blocking) {
-            /* O_NONBLOCK is preserved across SCM_RIGHTS so reset it */
-            if (!qemu_set_blocking(*fd, true, errp)) {
-                return false;
+            Error *local_err = NULL;
+
+            /*
+             * O_NONBLOCK is preserved across SCM_RIGHTS so reset it.
+             *
+             * Local experiment (not for upstream): some descriptors do
+             * not support F_SETFL at all, e.g. POSIX shared memory on
+             * macOS (memory-backend-shm, used by the vhost-user qtests
+             * where memfd is unavailable).  The descriptor was received
+             * fine; failing the whole read here made the chardev drop
+             * the connection.  Report and carry on instead.
+             */
+            if (!qemu_set_blocking(*fd, true, &local_err)) {
+                fprintf(stderr, "QIO: ignoring: %s\n",
+                        error_get_pretty(local_err));
+                error_free(local_err);
             }
         }
 
