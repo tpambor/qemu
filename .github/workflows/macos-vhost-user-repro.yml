@@ -319,3 +319,119 @@ jobs:
           name: logs-freebsd-14.2
           path: freebsd-logs/
           if-no-files-found: ignore
+
+  # OpenBSD: same approach as FreeBSD, with the package set from
+  # tests/vm/generated/openbsd.json.
+  repro-openbsd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    env:
+      PCI_BUS: /ppc64/pseries/spapr-pci-host-bridge/pci-bus-spapr/pci-bus
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test inside an OpenBSD VM
+        id: vm
+        continue-on-error: true
+        uses: cross-platform-actions/action@v0.28.0
+        with:
+          operating_system: openbsd
+          version: '7.6'
+          architecture: x86-64
+          cpu_count: 4
+          memory: 12G
+          shell: bash
+          sync_files: true
+          run: |
+            set -o pipefail
+            PPC64_TESTS="qtest-ppc64/qos-test qtest-ppc64/device-introspect-test qtest-ppc64/cdrom-test qtest-ppc64/migration-test qtest-ppc64/prom-env-test qtest-ppc64/boot-serial-test"
+            RECONNECT=/ppc64/pseries/spapr-pci-host-bridge/pci-bus-spapr/pci-bus/virtio-net-pci/virtio-net/virtio-net-tests/vhost-user/reconnect
+            NCPU=$(sysctl -n hw.ncpu)
+            uname -a; uname -r; echo "cpus: $NCPU"
+            mkdir -p openbsd-logs
+            SUDO=sudo; command -v sudo >/dev/null 2>&1 || SUDO=doas
+            $SUDO pkg_add -I bash bison bzip2 dtc git glib2 gmake gsed libffi meson ninja pkgconf python3
+            $SUDO pkg_add -I py3-setuptools py3-wheel || true
+            export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/X11R6/lib/pkgconfig
+            mkdir build && cd build
+            ../configure --cc=cc \
+              --extra-cflags="-I/usr/local/include -I/usr/X11R6/include" \
+              --extra-ldflags="-L/usr/local/lib -L/usr/X11R6/lib" \
+              --target-list=ppc64-softmmu \
+              --enable-vhost-user \
+              --enable-vhost-user-blk-server \
+              --disable-docs \
+              --disable-rust \
+              --disable-plugins \
+              --disable-werror \
+              || { cat config.log meson-logs/meson-log.txt; exit 1; }
+            gmake -j$NCPU
+            gmake -j$NCPU check-build
+            export QTEST_QEMU_BINARY=./qemu-system-ppc64 QTEST_QEMU_IMG=./qemu-img
+            export QTEST_QEMU_STORAGE_DAEMON_BINARY=./storage-daemon/qemu-storage-daemon
+            echo "== all qos tests (no arguments)"
+            ./tests/qtest/qos-test 2>&1 | tee ../openbsd-logs/virtio.log || true
+            echo "== stress run"
+            gmake -j6 check-qtest-ppc64 MTESTARGS="--repeat 5 $PPC64_TESTS" 2>&1 | tee ../openbsd-logs/stress.log || true
+            echo "== reconnect loop under CPU load"
+            hogs=""
+            for i in $(seq 1 $((NCPU * 2))); do yes > /dev/null & hogs="$hogs $!"; done
+            fails=0
+            for i in $(seq 1 30); do
+              if ./tests/qtest/qos-test -p $RECONNECT > ../openbsd-logs/loop-$i.log 2>&1; then
+                echo "iteration $i: ok"
+              else
+                echo "iteration $i: FAILED"; fails=$((fails + 1))
+              fi
+            done
+            kill $hogs
+            echo "loop failures: $fails/30" | tee ../openbsd-logs/loop-summary.txt
+            cp meson-logs/testlog.txt ../openbsd-logs/ 2>/dev/null || true
+            cd .. && rm -rf build
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "## vhost-user/reconnect on OpenBSD 7.6 (VM on ${{ runner.os }})"
+            echo
+            echo "VM step outcome: ${{ steps.vm.outcome }}"
+            cat openbsd-logs/loop-summary.txt 2>/dev/null || echo "loop: no result"
+            echo
+            if grep -rq 'wait_for_fds: assertion failed' openbsd-logs 2>/dev/null; then
+              echo "**REPRODUCED**: wait_for_fds assertion seen"
+            else
+              echo "**NOT REPRODUCED**: wait_for_fds assertion not seen"
+            fi
+            echo
+            echo '```'
+            grep -h -E 'vhost-user/reconnect|^Ok:|^Fail:|^Timeout:|Summary of Failures|qos-test +(OK|ERROR|FAIL|TIMEOUT)' openbsd-logs/stress.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo "### vhost-user tests (from the full qos-test run)"
+            echo '```'
+            grep -E '^(ok|not ok) ' openbsd-logs/virtio.log 2>/dev/null | grep vhost-user | sed -E "s|$PCI_BUS/||" || true
+            echo '```'
+            echo
+            echo "### All qos tests by device (ok / not ok)"
+            echo '```'
+            grep -E '^(ok|not ok) ' openbsd-logs/virtio.log 2>/dev/null \
+              | sed -E "s#^(ok|not ok) [0-9]+ $PCI_BUS/#\\1 #; s#^(ok|not ok) [0-9]+ /ppc64/#\\1 #" \
+              | awk '{ p = ($1 == "ok") ? $2 : $3; split(p, a, "/"); k = a[1]; if ($1 == "ok") ok[k]++; else bad[k]++ }
+                     END { for (k in ok) if (!(k in bad)) bad[k] = 0; for (k in bad) if (!(k in ok)) ok[k] = 0;
+                           for (k in ok) printf "%-28s %3d / %d\n", k, ok[k], bad[k] }' | sort || true
+            echo '```'
+            echo
+            echo "### Failing qos tests, if any"
+            echo '```'
+            grep -E '^not ok ' openbsd-logs/virtio.log 2>/dev/null | cut -c1-200 || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-openbsd-7.6
+          path: openbsd-logs/
+          if-no-files-found: ignore
