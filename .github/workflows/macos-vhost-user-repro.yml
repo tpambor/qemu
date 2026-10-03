@@ -16,6 +16,11 @@ on:
     branches:
       - claude/macos-vhost-user-repro
   workflow_dispatch:
+    inputs:
+      build_ref:
+        description: Git ref to build in the build-macos job
+        default: claude/macos-vhost-user-fixes
+        required: false
 
 jobs:
   repro:
@@ -435,3 +440,73 @@ jobs:
           name: logs-openbsd-7.6
           path: openbsd-logs/
           if-no-files-found: ignore
+
+  # A conventional macOS (Apple silicon) build of qemu-system-x86_64 plus
+  # qemu-storage-daemon and the tools, installed into a relocatable prefix and
+  # uploaded as a tarball for manual testing.  Builds the clean fixes branch
+  # by default (no diagnostic prints), or the ref given on manual dispatch.
+  build-macos:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.build_ref || 'claude/macos-vhost-user-fixes' }}
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install bash capstone coreutils dtc gettext glib gnutls jpeg-turbo libpng \
+            libslirp libssh libusb lzo make meson ninja pixman pkgconf python3 snappy zstd
+
+      - name: Configure
+        run: |
+          mkdir build && cd build
+          prefix=$(brew --prefix)
+          ../configure \
+            --extra-cflags="-I$prefix/include" \
+            --extra-ldflags="-L$prefix/lib" \
+            --prefix="$PWD/../install" \
+            --target-list=x86_64-softmmu \
+            --enable-vhost-user \
+            --enable-vhost-user-blk-server \
+            --enable-cocoa \
+            --enable-vnc \
+            --enable-slirp \
+            --enable-virtfs \
+            --enable-tools \
+            --disable-rust \
+            --disable-docs \
+            --disable-werror \
+            || { cat config.log meson-logs/meson-log.txt; exit 1; }
+
+      - name: Build and install
+        run: |
+          cd build
+          gmake -j$(sysctl -n hw.ncpu)
+          gmake install
+          ls -l ../install/bin
+
+      - name: Smoke test
+        run: |
+          install/bin/qemu-system-x86_64 --version
+          install/bin/qemu-storage-daemon --version
+          install/bin/qemu-img --version
+          install/bin/qemu-system-x86_64 -machine help | head -3
+          install/bin/qemu-system-x86_64 -device help | grep -E 'vhost-user-(net|blk)' || true
+          install/bin/qemu-storage-daemon --export help 2>&1 | head -5 || true
+
+      - name: Package
+        run: |
+          rev=$(git rev-parse --short HEAD)
+          echo "commit $rev, built $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(sw_vers -productVersion) $(uname -m)" > install/BUILD-INFO
+          echo "ref: ${{ inputs.build_ref || 'claude/macos-vhost-user-fixes' }}" >> install/BUILD-INFO
+          tar -C install -czf qemu-macos-arm64-$rev.tar.gz .
+          ls -lh qemu-macos-arm64-$rev.tar.gz
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-macos-arm64-x86_64-softmmu
+          path: qemu-macos-arm64-*.tar.gz
+          if-no-files-found: error
