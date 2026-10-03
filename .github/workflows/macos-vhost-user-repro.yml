@@ -367,15 +367,24 @@ jobs:
               || { cat config.log meson-logs/meson-log.txt; exit 1; }
             gmake -j$NCPU
             gmake -j$NCPU check-build
+            # The tests run in a fresh login of the "staff" class so the
+            # data-size limit can be lifted: OpenBSD charges anonymous mmap to
+            # RLIMIT_DATA and the default class caps it below what a TCG
+            # pseries guest needs (512 MiB RAM plus the 1 GiB code buffer), so
+            # boot-serial-test's QEMU died with "Cannot set up 512 MiB of guest
+            # memory 'ppc_spapr.ram': Cannot allocate memory" (runs 22 and 24).
+            cat > ../openbsd-tests.sh <<'EOS'
+            set -o pipefail
+            PPC64_TESTS="qtest-ppc64/qos-test qtest-ppc64/device-introspect-test qtest-ppc64/cdrom-test qtest-ppc64/migration-test qtest-ppc64/prom-env-test qtest-ppc64/boot-serial-test"
+            RECONNECT=/ppc64/pseries/spapr-pci-host-bridge/pci-bus-spapr/pci-bus/virtio-net-pci/virtio-net/virtio-net-tests/vhost-user/reconnect
+            NCPU=$(sysctl -n hw.ncpu)
+            echo "datasize limit in test login: $(ulimit -d) KiB (hard $(ulimit -H -d))"
             export QTEST_QEMU_BINARY=./qemu-system-ppc64 QTEST_QEMU_IMG=./qemu-img
             export QTEST_QEMU_STORAGE_DAEMON_BINARY=./storage-daemon/qemu-storage-daemon
             echo "== all qos tests (no arguments)"
             ./tests/qtest/qos-test 2>&1 | tee ../openbsd-logs/virtio.log || true
             echo "== stress run"
-            # OpenBSD does not overcommit memory: six parallel qtests (each
-            # QEMU maps 512 MiB of guest RAM plus its TCG buffer) exhaust the
-            # 12G VM with ENOMEM, so run three at a time.
-            gmake -j3 check-qtest-ppc64 MTESTARGS="--repeat 5 $PPC64_TESTS" 2>&1 | tee ../openbsd-logs/stress.log || true
+            gmake -j6 check-qtest-ppc64 MTESTARGS="--repeat 5 $PPC64_TESTS" 2>&1 | tee ../openbsd-logs/stress.log || true
             echo "== reconnect loop under CPU load"
             hogs=""
             for i in $(seq 1 $((NCPU * 2))); do yes > /dev/null & hogs="$hogs $!"; done
@@ -390,6 +399,9 @@ jobs:
             kill $hogs
             echo "loop failures: $fails/30" | tee ../openbsd-logs/loop-summary.txt
             cp meson-logs/testlog.txt ../openbsd-logs/ 2>/dev/null || true
+            EOS
+            echo "datasize limit in build shell: $(ulimit -d) KiB (hard $(ulimit -H -d))"
+            $SUDO su -c staff -l "$(id -un)" -c "cd $PWD && ulimit -d unlimited && bash ../openbsd-tests.sh"
             cd .. && rm -rf build
 
       - name: Report
