@@ -354,6 +354,8 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
         p += VHOST_USER_HDR_SIZE;
         size = qemu_chr_fe_read_all(chr, p, msg.size);
         if (size != msg.size) {
+            g_printerr("TEST payload read for req=%u: got %d of %u (errno=%d %s)\n",
+                       msg.request, size, msg.size, errno, strerror(errno));
             g_test_message("Wrong message size received %d != %d",
                            size, msg.size);
             goto out;
@@ -608,6 +610,7 @@ static void chr_event(void *opaque, QEMUChrEvent event)
 {
     TestServer *s = opaque;
 
+    g_printerr("TEST chr event %d (test_flags=%d)\n", event, s->test_flags);
     if (s->test_flags == TEST_FLAGS_END &&
         event == CHR_EVENT_CLOSED) {
         s->test_flags = TEST_FLAGS_OK;
