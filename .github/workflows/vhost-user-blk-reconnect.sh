@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
 # Local experiment. Not intended for upstream.
 #
-# Reconnect test for vhost-user-blk: a Fedora cloud guest writes to its disk
-# in a loop while qemu-storage-daemon (the vhost-user-blk back-end) is
-# SIGKILLed and restarted underneath it.  QEMU's chardev reconnects; the
-# back-end then has to resume the requests that were in flight (tracked in
-# the inflight region) and the ones the guest queued while it was gone.
-# The guest prints ITER n after each write and a marker at the end; the
-# marker and QEMU exiting on the guest's power-off are the pass criterion.
+# Reconnect test for vhost-user-blk: a Fedora cloud guest runs many
+# concurrent O_DIRECT writers against its disk while qemu-storage-daemon (the
+# vhost-user-blk back-end) is SIGKILLed and restarted underneath it.  QEMU's
+# chardev reconnects; the back-end then has to resume the requests that were
+# in flight (tracked in the inflight region) and the ones the guest queued
+# while it was gone.  The writers keep the virtqueue full, so once the
+# back-end is gone the driver cannot submit anything else and nothing in the
+# guest kicks the ring again: the back-end has to find the pending requests
+# by itself when the ring is restarted.  Each writer prints DONE n when it
+# finishes and the guest prints a marker when all of them have; the marker
+# and QEMU exiting on the guest's power-off are the pass criterion.
 #
 # usage: vhost-user-blk-reconnect.sh <qemu build dir> <log dir> [image]
 set -uo pipefail
@@ -20,10 +24,10 @@ SOCK=/tmp/vhost-reconnect.socket
 QEMU=$BUILD/qemu-system-x86_64
 QSD=$BUILD/storage-daemon/qemu-storage-daemon
 QIMG=$BUILD/qemu-img
-BOOT_TIMEOUT=${BOOT_TIMEOUT:-1800}   # until the guest reaches ITER 5
+BOOT_TIMEOUT=${BOOT_TIMEOUT:-1800}   # until KILL_AT writers are done
 RESUME_TIMEOUT=${RESUME_TIMEOUT:-300} # from the back-end restart to power-off
-KILL_AT=${KILL_AT:-5}                 # kill the back-end after this ITER
-ITERS=${ITERS:-30}
+KILL_AT=${KILL_AT:-5}                 # kill the back-end once this many writers are done
+WRITERS=${WRITERS:-150}               # concurrent O_DIRECT writers (virtqueue has 128 entries)
 
 mkdir -p "$LOGS"
 cd "$LOGS" || exit 1
@@ -50,8 +54,7 @@ printf 'instance-id: vub-reconnect\nlocal-hostname: vub-reconnect\n' > seed/meta
 cat > seed/user-data <<EOF
 #cloud-config
 runcmd:
-  - [ sh, -c, "for i in \$(seq 1 $ITERS); do dd if=/dev/zero of=/var/tmp/vub-\$i.bin bs=1M count=4 oflag=direct conv=fsync 2>/dev/null && echo ITER \$i > /dev/ttyS0; done" ]
-  - [ sh, -c, "sync && echo VHOST_USER_BLK_RECONNECT_OK > /dev/ttyS0" ]
+  - [ sh, -c, "for i in \$(seq 1 $WRITERS); do ( dd if=/dev/zero of=/var/tmp/w-\$i.bin bs=64k count=32 oflag=direct 2>/dev/null; echo DONE \$i > /dev/ttyS0 ) & done; wait; sync; echo VHOST_USER_BLK_RECONNECT_OK > /dev/ttyS0" ]
 power_state:
   mode: poweroff
   timeout: 30
@@ -86,16 +89,6 @@ start_qsd() {
     echo "storage daemon pid $QSD_PID listening on $SOCK"
 }
 
-wait_serial() { # pattern timeout
-    local i
-    for i in $(seq 1 "$2"); do
-        grep -a -q -E "$1" serial.log 2>/dev/null && return 0
-        kill -0 $QEMU_PID 2>/dev/null || return 1
-        sleep 1
-    done
-    return 1
-}
-
 echo "== qemu-storage-daemon"
 : > qsd.log
 start_qsd || exit 1
@@ -111,17 +104,27 @@ start=$(date +%s)
     -serial file:serial.log > qemu.log 2>&1 &
 QEMU_PID=$!
 
-if ! wait_serial "^ITER $KILL_AT([^0-9]|$)" "$BOOT_TIMEOUT"; then
-    echo "FAIL: guest did not reach ITER $KILL_AT within ${BOOT_TIMEOUT}s"
+wait_done() { # count timeout: wait until at least $1 writers printed DONE
+    local i
+    for i in $(seq 1 "$2"); do
+        [ "$(grep -a -c '^DONE ' serial.log 2>/dev/null)" -ge "$1" ] && return 0
+        kill -0 $QEMU_PID 2>/dev/null || return 1
+        sleep 1
+    done
+    return 1
+}
+
+if ! wait_done "$KILL_AT" "$BOOT_TIMEOUT"; then
+    echo "FAIL: fewer than $KILL_AT writers finished within ${BOOT_TIMEOUT}s"
     kill $QEMU_PID 2>/dev/null; wait $QEMU_PID 2>/dev/null
     kill $QSD_PID 2>/dev/null; wait $QSD_PID 2>/dev/null
     cat qemu.log; echo "RESULT: FAIL" | tee summary.txt; exit 1
 fi
-echo "guest reached ITER $KILL_AT after $(( $(date +%s) - start ))s; killing the back-end (pid $QSD_PID)"
+echo "$(grep -a -c '^DONE ' serial.log) writers done after $(( $(date +%s) - start ))s; killing the back-end (pid $QSD_PID)"
 kill -9 $QSD_PID; wait $QSD_PID 2>/dev/null
 sleep 3
-last_before=$(grep -a -E '^ITER [0-9]+' serial.log | tail -1)
-echo "last line before restart: $last_before"
+done_before=$(grep -a -c '^DONE ' serial.log)
+echo "writers done before the restart: $done_before/$WRITERS"
 echo "== restarting qemu-storage-daemon"
 start_qsd || exit 1
 restart=$(date +%s)
@@ -138,10 +141,10 @@ kill $QSD_PID 2>/dev/null; wait $QSD_PID 2>/dev/null
 echo "--- qemu.log"; cat qemu.log
 echo "--- qsd.log"; cat qsd.log
 echo "--- serial.log (progress and marker lines)"
-grep -a -E '^ITER |VHOST_USER_BLK|virtio_blk|reboot: |blk_update_request|I/O error|hung task' serial.log
+grep -a -E 'VHOST_USER_BLK|virtio_blk|reboot: |blk_update_request|I/O error|hung task|blocked for more' serial.log
 {
-    echo "back-end killed after $last_before"
-    echo "iterations completed: $(grep -a -c '^ITER ' serial.log)/$ITERS"
+    echo "writers done before the back-end restart: $done_before/$WRITERS"
+    echo "writers done in total: $(grep -a -c '^DONE ' serial.log)/$WRITERS"
     echo "qemu exit status $rc, $(( $(date +%s) - restart ))s after the restart"
     grep -a -E 'VHOST_USER_BLK|reboot: ' serial.log
 } > summary.txt
