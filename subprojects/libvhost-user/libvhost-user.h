@@ -392,6 +392,8 @@ typedef struct VuVirtq {
     int err_fd;
     unsigned int enable;
     bool started;
+    /* run the handler from the event loop (see vu_schedule_pending_requests) */
+    bool kick_pending;
 
     /* Guest addresses of our ring */
     struct vhost_vring_addr vra;
@@ -471,6 +473,16 @@ struct VuDev {
     /* Postcopy data */
     int postcopy_ufd;
     bool postcopy_listening;
+
+    /*
+     * Notifier owned by the library, used to run queue handlers from the
+     * event loop when a ring is started with requests already pending.
+     * The same eventfd on both sides on Linux, the two ends of a pipe
+     * elsewhere.
+     */
+    int self_kick_rfd;
+    int self_kick_wfd;
+    bool self_kick_watched;
 };
 
 typedef struct VuVirtqElement {
