@@ -33,7 +33,12 @@
 #include "standard-headers/linux/virtio_ring.h"
 #include "hw/virtio/vhost.h"
 #include "hw/virtio/virtio-bus.h"
+#ifdef CONFIG_LINUX
 #include "linux-headers/linux/vhost.h"
+#else
+/* Local experiment: allow building vhost-net frontends on non-Linux hosts. */
+#define VHOST_FILE_UNBIND -1
+#endif
 
 void vhost_net_get_features_ex(struct vhost_net *net, uint64_t *features)
 {
