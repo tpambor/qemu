@@ -1,0 +1,203 @@
+name: vhost-user reconnect repro
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  # One job for every host and test mode.  All OS-specific details live in
+  # .github/workflows/vhost-user-ci.sh, which the job runs either directly on
+  # the runner (macOS, Ubuntu) or inside a FreeBSD/OpenBSD VM started on an
+  # Ubuntu runner by cross-platform-actions (QEMU, KVM-accelerated where the
+  # runner allows it), since GitHub has no BSD runners.
+  #
+  #   repro       build ppc64-softmmu and hunt the wait_for_fds assertion in
+  #               the vhost-user/reconnect qos test (never fails on test
+  #               failures, see the step summary and the uploaded logs)
+  #   functional  build x86_64-softmmu with the tools and the storage daemon,
+  #               then run .github/workflows/vhost-user-blk-boot.sh, which
+  #               exports a Fedora cloud image over vhost-user-blk with
+  #               qemu-storage-daemon and boots it with qemu-system-x86_64
+  #               (TCG); fails if the guest does not come up
+  test:
+    name: ${{ matrix.mode }} (${{ matrix.host }})
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [repro, functional]
+        host: [macos-15, ubuntu-24.04, freebsd-14.2, openbsd-7.7]
+        include:
+          - host: freebsd-14.2
+            vm: freebsd
+            vm_version: '14.2'
+          - host: openbsd-7.7
+            vm: openbsd
+            vm_version: '7.7'
+    runs-on: ${{ matrix.vm && 'ubuntu-24.04' || matrix.host }}
+    timeout-minutes: ${{ matrix.mode == 'repro' && 330 || 150 }}
+    env:
+      PCI_BUS: /ppc64/pseries/spapr-pci-host-bridge/pci-bus-spapr/pci-bus
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and test
+        if: ${{ !matrix.vm }}
+        id: native
+        run: bash .github/workflows/vhost-user-ci.sh ${{ matrix.mode }} logs
+
+      - name: Build and test inside a ${{ matrix.vm }} ${{ matrix.vm_version }} VM
+        if: ${{ matrix.vm }}
+        id: vm
+        uses: cross-platform-actions/action@v0.28.0
+        with:
+          operating_system: ${{ matrix.vm }}
+          version: ${{ matrix.vm_version }}
+          architecture: x86-64
+          cpu_count: 4
+          memory: 12G
+          shell: bash
+          sync_files: true
+          # CLEANUP keeps the sync back to the runner small
+          run: CLEANUP=1 bash .github/workflows/vhost-user-ci.sh ${{ matrix.mode }} logs
+
+      - name: Report (repro)
+        if: always() && matrix.mode == 'repro'
+        run: |
+          {
+            echo "## vhost-user/reconnect on ${{ matrix.host }}${{ matrix.vm && ' (VM on ubuntu-24.04)' || '' }}"
+            echo
+            echo "Build and test step outcome: ${{ matrix.vm && steps.vm.outcome || steps.native.outcome }}"
+            cat logs/status.txt 2>/dev/null || echo "no test results"
+            echo
+            if grep -rq 'wait_for_fds: assertion failed' logs 2>/dev/null; then
+              echo "**REPRODUCED**: wait_for_fds assertion seen"
+            else
+              echo "**NOT REPRODUCED**: wait_for_fds assertion not seen"
+            fi
+            echo
+            echo '```'
+            grep -h -E 'vhost-user/reconnect|^Ok:|^Fail:|^Timeout:|Summary of Failures|qos-test +(OK|ERROR|FAIL|TIMEOUT)' logs/stress.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo "### vhost-user tests (from the full qos-test run)"
+            echo '```'
+            grep -E '^(ok|not ok) ' logs/virtio.log 2>/dev/null | grep vhost-user | sed -E "s|$PCI_BUS/||" || true
+            echo '```'
+            echo
+            echo "### All qos tests by device (ok / not ok)"
+            echo '```'
+            grep -E '^(ok|not ok) ' logs/virtio.log 2>/dev/null \
+              | sed -E "s#^(ok|not ok) [0-9]+ $PCI_BUS/#\\1 #; s#^(ok|not ok) [0-9]+ /ppc64/#\\1 #" \
+              | awk '{ p = ($1 == "ok") ? $2 : $3; split(p, a, "/"); k = a[1]; if ($1 == "ok") ok[k]++; else bad[k]++ }
+                     END { for (k in ok) if (!(k in bad)) bad[k] = 0; for (k in bad) if (!(k in ok)) ok[k] = 0;
+                           for (k in ok) printf "%-28s %3d / %d\n", k, ok[k], bad[k] }' | sort || true
+            echo '```'
+            echo
+            echo "### Failing qos tests, if any"
+            echo '```'
+            grep -E '^not ok ' logs/virtio.log 2>/dev/null | cut -c1-200 || true
+            echo '```'
+            echo
+            echo "### Diagnostic run (up to 250 lines, TAP comments stripped)"
+            echo '```'
+            grep -v '^# ' logs/diag.log 2>/dev/null | head -250 || true
+            echo '```'
+            echo
+            echo "### Loop iteration 1 (up to 120 lines, TAP comments stripped)"
+            echo '```'
+            grep -v '^# ' logs/loop-1.log 2>/dev/null | head -120 || true
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -rl 'wait_for_fds: assertion failed' logs 2>/dev/null || true
+
+      - name: Report (functional)
+        if: always() && matrix.mode == 'functional'
+        run: |
+          {
+            echo "## Fedora 44 over vhost-user-blk on ${{ matrix.host }}${{ matrix.vm && ' (VM on ubuntu-24.04)' || '' }} (TCG)"
+            echo "Build and test step outcome: ${{ matrix.vm && steps.vm.outcome || steps.native.outcome }}"
+            echo '```'
+            cat logs/summary.txt 2>/dev/null || echo "no summary (test did not run to completion)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.mode }}-logs-${{ matrix.host }}
+          path: logs/
+          if-no-files-found: ignore
+
+  # A conventional macOS (Apple silicon) build of qemu-system-x86_64 plus
+  # qemu-storage-daemon and the tools, installed into a relocatable prefix and
+  # uploaded as a tarball for manual testing.  Builds the commit the workflow
+  # runs on.
+  build-macos:
+    runs-on: macos-15
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          # keep the preinstalled Homebrew packages: no index refresh, no upgrade of
+          # already installed formulae or their dependents.  Upgrading openssl@3 on
+          # the macos-15 image fails to link over a stale openssl@1.1 symlink.
+          export HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_UPGRADE=1 \
+                 HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1
+          brew install bash capstone coreutils dtc gettext glib gnutls jpeg-turbo libpng \
+            libslirp libssh libusb lzo make meson ninja pixman pkgconf python3 snappy zstd
+
+      - name: Configure
+        run: |
+          mkdir build && cd build
+          prefix=$(brew --prefix)
+          ../configure \
+            --extra-cflags="-I$prefix/include" \
+            --extra-ldflags="-L$prefix/lib" \
+            --prefix="$PWD/../install" \
+            --target-list=x86_64-softmmu \
+            --enable-vhost-user \
+            --enable-vhost-user-blk-server \
+            --enable-cocoa \
+            --enable-vnc \
+            --enable-slirp \
+            --enable-virtfs \
+            --enable-tools \
+            --disable-rust \
+            --disable-docs \
+            --disable-werror \
+            || { cat config.log meson-logs/meson-log.txt; exit 1; }
+
+      - name: Build and install
+        run: |
+          cd build
+          gmake -j$(sysctl -n hw.ncpu)
+          gmake install
+          ls -l ../install/bin
+
+      - name: Smoke test
+        run: |
+          install/bin/qemu-system-x86_64 --version
+          install/bin/qemu-storage-daemon --version
+          install/bin/qemu-img --version
+          install/bin/qemu-system-x86_64 -machine help | grep -E '^(q35|pc|microvm) '
+          install/bin/qemu-system-x86_64 -device help | grep -E 'vhost-user-(net|blk)' || true
+          install/bin/qemu-storage-daemon --export help 2>&1 | head -5 || true
+
+      - name: Package
+        run: |
+          rev=$(git rev-parse --short HEAD)
+          echo "commit $rev, built $(date -u +%Y-%m-%dT%H:%M:%SZ) on $(sw_vers -productVersion) $(uname -m)" > install/BUILD-INFO
+          echo "ref: ${{ github.ref_name }}" >> install/BUILD-INFO
+          tar -C install -czf qemu-macos-arm64-$rev.tar.gz .
+          ls -lh qemu-macos-arm64-$rev.tar.gz
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-macos-arm64-x86_64-softmmu
+          path: qemu-macos-arm64-*.tar.gz
+          if-no-files-found: error
+
