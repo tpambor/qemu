@@ -503,15 +503,6 @@ static int vhost_user_write(struct vhost_dev *dev, VhostUserMsg *msg,
         return 0;
     }
 
-    if (u->user->disconnected) {
-        fprintf(stderr, "VU %" PRId64 " tx req=%u SUPPRESSED (disconnected)\n",
-                g_get_monotonic_time(), msg->hdr.request);
-        return -ENOTCONN;
-    }
-
-    fprintf(stderr, "VU %" PRId64 " tx req=%u size=%u fds=%d\n",
-            g_get_monotonic_time(), msg->hdr.request, msg->hdr.size, fd_num);
-
     if (qemu_chr_fe_set_msgfds(chr, fds, fd_num) < 0) {
         error_report("Failed to set msg fds.");
         return -EINVAL;

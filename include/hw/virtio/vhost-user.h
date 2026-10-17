@@ -73,8 +73,6 @@ typedef struct VhostUserState {
     GPtrArray *notifiers;
     int memory_slots;
     bool supports_config;
-    /* Local experiment: set on CHR_EVENT_CLOSED, cleared on the next start */
-    bool disconnected;
 } VhostUserState;
 
 /**

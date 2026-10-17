@@ -251,7 +251,6 @@ static bool wait_for_fds(TestServer *s)
     while (!s->fds_num) {
         if (!g_cond_wait_until(&s->data_cond, &s->data_mutex, end_time)) {
             /* timeout has passed */
-            g_printerr("TEST %" PRId64 " wait_for_fds timed out\n", g_get_monotonic_time());
             g_assert(s->fds_num);
             break;
         }
@@ -361,9 +360,6 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
         }
     }
 
-    g_printerr("TEST %" PRId64 " rx req=%u size=%u\n",
-               g_get_monotonic_time(), msg.request, msg.size);
-
     switch (msg.request) {
     case VHOST_USER_GET_FEATURES:
         /* Mandatory for tests to define get_features */
@@ -457,8 +453,6 @@ static void chr_read(void *opaque, const uint8_t *buf, int size)
         memcpy(&s->memory, &msg.payload.memory, sizeof(msg.payload.memory));
         s->fds_num = qemu_chr_fe_get_msgfds(chr, s->fds,
                                             G_N_ELEMENTS(s->fds));
-        g_printerr("TEST %" PRId64 " SET_MEM_TABLE fds_num=%d nregions=%u\n",
-                   g_get_monotonic_time(), s->fds_num, s->memory.nregions);
 
         /* signal the test that it can continue */
         g_cond_broadcast(&s->data_cond);
@@ -609,8 +603,6 @@ static TestServer *test_server_new(const gchar *name,
 static void chr_event(void *opaque, QEMUChrEvent event)
 {
     TestServer *s = opaque;
-
-    g_printerr("TEST %" PRId64 " chr event %d\n", g_get_monotonic_time(), event);
 
     if (s->test_flags == TEST_FLAGS_END &&
         event == CHR_EVENT_CLOSED) {
@@ -933,7 +925,6 @@ reconnect_cb(gpointer user_data)
 {
     TestServer *s = user_data;
 
-    g_printerr("TEST %" PRId64 " reconnect_cb: disconnecting\n", g_get_monotonic_time());
     qemu_chr_fe_disconnect(&s->chr);
 
     return FALSE;
