@@ -522,9 +522,25 @@ static gboolean tcp_chr_hup(QIOChannel *channel,
                                void *opaque)
 {
     Chardev *chr = CHARDEV(opaque);
+
+    if (!(cond & G_IO_HUP)) {
+        /*
+         * Woken for readability only (see update_ioc_handlers): only
+         * treat it as a hang-up if the peer really closed (EOF).
+         */
+        SocketChardev *s = SOCKET_CHARDEV(chr);
+        QIOChannelSocket *sioc = QIO_CHANNEL_SOCKET(s->ioc);
+        char c;
+        ssize_t n = recv(sioc->fd, &c, 1, MSG_PEEK | MSG_DONTWAIT);
+        if (n != 0) {
+            return G_SOURCE_CONTINUE;
+        }
+        fprintf(stderr, "CHR %" PRId64 " %s EOF detected via readability\n",
+                g_get_monotonic_time(), chr->label);
+    }
     trace_chr_socket_hangup(chr, chr->label);
-    fprintf(stderr, "CHR %" PRId64 " %s hangup source fired\n",
-            g_get_monotonic_time(), chr->label);
+    fprintf(stderr, "CHR %" PRId64 " %s hangup source fired (cond=%d)\n",
+            g_get_monotonic_time(), chr->label, cond);
     tcp_chr_disconnect(chr);
     return G_SOURCE_REMOVE;
 }
@@ -616,7 +632,25 @@ static void update_ioc_handlers(SocketChardev *s)
                                      chr->gcontext);
 
     remove_hup_source(s);
-    s->hup_source = qio_channel_create_watch(s->ioc, G_IO_HUP);
+    {
+        GIOCondition hup_cond = G_IO_HUP;
+#ifndef CONFIG_LINUX
+        /*
+         * Local experiment (not for upstream): on FreeBSD, poll() only
+         * registers a wakeup (selrecord) for read/write interest, so a
+         * watch that asks for G_IO_HUP alone is never woken when the
+         * peer closes the connection.  When the frontend has no reader
+         * (e.g. vhost-user after CHR_EVENT_CLOSED cleared its handlers)
+         * nobody polls the fd for readability, and the hang-up goes
+         * unnoticed until an unrelated event wakes the main loop.  Ask
+         * for readability too in that case; tcp_chr_hup checks for EOF.
+         */
+        if (!chr->be || !chr->be->chr_can_read) {
+            hup_cond |= G_IO_IN;
+        }
+#endif
+        s->hup_source = qio_channel_create_watch(s->ioc, hup_cond);
+    }
     /*
      * poll() is liable to return POLLHUP even when there is
      * still incoming data available to read on the FD. If
