@@ -161,8 +161,8 @@ jobs:
             echo "### All qos tests by device (ok / not ok)"
             echo '```'
             grep -E '^(ok|not ok) ' virtio.log 2>/dev/null \
-              | sed -E "s|^(ok|not ok) [0-9]+ $PCI_BUS/|\\1 |; s|^(ok|not ok) [0-9]+ /ppc64/|\\1 |" \
-              | awk '{ n = split($NF, a, "/"); k = a[1]; if ($1 == "ok") ok[k]++; else bad[k]++ }
+              | sed -E "s#^(ok|not ok) [0-9]+ $PCI_BUS/#\\1 #; s#^(ok|not ok) [0-9]+ /ppc64/#\\1 #" \
+              | awk '{ p = ($1 == "ok") ? $2 : $3; split(p, a, "/"); k = a[1]; if ($1 == "ok") ok[k]++; else bad[k]++ }
                      END { for (k in ok) if (!(k in bad)) bad[k] = 0; for (k in bad) if (!(k in ok)) ok[k] = 0;
                            for (k in ok) printf "%-28s %3d / %d\n", k, ok[k], bad[k] }' | sort || true
             echo '```'
