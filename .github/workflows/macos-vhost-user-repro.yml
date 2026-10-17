@@ -72,21 +72,7 @@ jobs:
       - name: Build tests
         run: cd build && gmake -j$(sysctl -n hw.ncpu) check-build
 
-      - name: Sanity run (unloaded, all vhost-user tests once)
-        id: sanity
-        continue-on-error: true
-        run: |
-          cd build
-          QTEST_QEMU_BINARY=./qemu-system-ppc64 QTEST_QEMU_IMG=./qemu-img \
-            ./tests/qtest/qos-test \
-              -p ${RECONNECT%/reconnect} \
-              -p ${RECONNECT%/reconnect}/read-guest-mem \
-              -p $PCI_BUS/vhost-user-gpio-pci/vhost-user-gpio/vhost-user-gpio-tests/read-guest-mem \
-              -p $PCI_BUS/vhost-user-blk-pci/vhost-user-blk/vhost-user-blk-tests \
-              -p $PCI_BUS/vhost-user-blk-pci/vhost-user-blk-pci-tests 2>&1 | tee ../vhost-user.log
-          ! grep -q '^not ok' ../vhost-user.log
-
-      - name: All virtio qos tests (unloaded, once)
+      - name: All qos tests (unloaded, once, no arguments)
         id: virtio
         continue-on-error: true
         run: |
@@ -138,8 +124,7 @@ jobs:
           {
             echo "## vhost-user/reconnect on ${{ matrix.os }}"
             echo
-            echo "Sanity step outcome (all vhost-user tests): ${{ steps.sanity.outcome }}"
-            echo "All virtio qos tests outcome: ${{ steps.virtio.outcome }}"
+            echo "All qos tests (no arguments) outcome: ${{ steps.virtio.outcome }}"
             echo "Stress step outcome: ${{ steps.stress.outcome }}"
             echo "Loop failures: ${{ steps.loop.outputs.loop_failures }}/30"
             echo
@@ -153,9 +138,9 @@ jobs:
             grep -h -E 'vhost-user/reconnect|^Ok:|^Fail:|^Timeout:|Summary of Failures|qos-test +(OK|ERROR|FAIL|TIMEOUT)' stress.log 2>/dev/null || true
             echo '```'
             echo
-            echo "### vhost-user tests (unloaded)"
+            echo "### vhost-user tests (from the full qos-test run)"
             echo '```'
-            grep -E '^(ok|not ok) ' vhost-user.log 2>/dev/null | sed -E "s|$PCI_BUS/||" || true
+            grep -E '^(ok|not ok) ' virtio.log 2>/dev/null | grep vhost-user | sed -E "s|$PCI_BUS/||" || true
             echo '```'
             echo
             echo "### All qos tests by device (ok / not ok)"
@@ -192,7 +177,6 @@ jobs:
           path: |
             stress.log
             diag.log
-            vhost-user.log
             virtio.log
             loop-*.log
             build/meson-logs/
