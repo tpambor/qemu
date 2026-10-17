@@ -503,6 +503,8 @@ static gboolean tcp_chr_read(QIOChannel *chan, GIOCondition cond, void *opaque)
     size = tcp_chr_recv(chr, (void *)buf, len);
     if (size == 0 || (size == -1 && errno != EAGAIN)) {
         /* connection closed */
+        fprintf(stderr, "CHR %s: read watch disconnect: size=%d errno=%d %s\n",
+                chr->label, size, errno, strerror(errno));
         tcp_chr_disconnect(chr);
     } else if (size > 0) {
         if (s->do_telnetopt) {
@@ -544,6 +546,8 @@ static gboolean tcp_chr_hup(QIOChannel *channel,
             return G_SOURCE_REMOVE;
         }
     }
+    fprintf(stderr, "CHR %s: hang-up watch disconnect (cond=0x%x)\n",
+            chr->label, cond);
     trace_chr_socket_hangup(chr, chr->label);
     tcp_chr_disconnect(chr);
     return G_SOURCE_REMOVE;
@@ -568,6 +572,8 @@ static int tcp_chr_sync_read(Chardev *chr, const uint8_t *buf, int len)
     saved_errno = errno;
     if (s->state != TCP_CHARDEV_STATE_DISCONNECTED) {
         if (!qio_channel_set_blocking(s->ioc, false, &local_err)) {
+            fprintf(stderr, "CHR %s: sync read: set non-blocking failed\n",
+                    chr->label);
             error_report_err(local_err);
             /* failed to recover non-blocking state */
             tcp_chr_disconnect(chr);
@@ -575,6 +581,7 @@ static int tcp_chr_sync_read(Chardev *chr, const uint8_t *buf, int len)
     }
     if (size == 0) {
         /* connection closed */
+        fprintf(stderr, "CHR %s: sync read EOF (len=%d)\n", chr->label, len);
         tcp_chr_disconnect(chr);
     }
 
