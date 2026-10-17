@@ -135,14 +135,14 @@ jobs:
             grep -h -E 'vhost-user/reconnect|^Ok:|^Fail:|^Timeout:|Summary of Failures|qos-test +(OK|ERROR|FAIL|TIMEOUT)' stress.log 2>/dev/null || true
             echo '```'
             echo
-            echo "### Diagnostic run (first 80 lines)"
+            echo "### Diagnostic run (up to 250 lines, TAP comments stripped)"
             echo '```'
-            head -80 diag.log 2>/dev/null || true
+            grep -v '^# ' diag.log 2>/dev/null | head -250 || true
             echo '```'
             echo
-            echo "### Loop iteration 1 (first 60 lines)"
+            echo "### Loop iteration 1 (up to 120 lines, TAP comments stripped)"
             echo '```'
-            head -60 loop-1.log 2>/dev/null || true
+            grep -v '^# ' loop-1.log 2>/dev/null | head -120 || true
             echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           grep -rl 'wait_for_fds: assertion failed' stress.log loop-*.log build/meson-logs 2>/dev/null || true
