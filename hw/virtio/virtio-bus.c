@@ -292,7 +292,13 @@ int virtio_bus_set_host_notifier(VirtioBusState *bus, int n, bool assign)
     }
 
     if (assign) {
-        r = event_notifier_init(notifier, 1);
+        /*
+         * Experiment (not for upstream): the notifier used to be created
+         * already signalled, which makes the kick fd readable as soon as
+         * the back-end receives it, i.e. an implicit kick after
+         * VHOST_USER_SET_VRING_KICK.  Create it idle instead.
+         */
+        r = event_notifier_init(notifier, 0);
         if (r < 0) {
             error_report("%s: unable to init event notifier: %s (%d)",
                          __func__, strerror(-r), r);
