@@ -589,9 +589,16 @@ static ssize_t qio_channel_socket_readv(QIOChannel *ioc,
             goto retry;
         }
 
+        fprintf(stderr, "QIO recvmsg(fd=%d, want=%zu, ctrl=%zu) failed: errno=%d %s\n",
+                sioc->fd, iov_size(iov, niov), (size_t)msg.msg_controllen,
+                errno, strerror(errno));
         error_setg_errno(errp, errno,
                          "Unable to read from socket");
         return -1;
+    }
+    if (msg.msg_flags & (MSG_CTRUNC | MSG_TRUNC)) {
+        fprintf(stderr, "QIO recvmsg(fd=%d, want=%zu) ret=%zd flags=0x%x (truncated)\n",
+                sioc->fd, iov_size(iov, niov), ret, msg.msg_flags);
     }
 
     if (fds && nfds) {
