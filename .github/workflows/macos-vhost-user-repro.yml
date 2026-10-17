@@ -350,11 +350,11 @@ jobs:
             uname -a; uname -r; echo "cpus: $NCPU"
             mkdir -p openbsd-logs
             SUDO=sudo; command -v sudo >/dev/null 2>&1 || SUDO=doas
-            $SUDO pkg_add -I bash bison bzip2 dtc git glib2 gmake gsed libffi meson ninja pkgconf python3
-            $SUDO pkg_add -I py3-setuptools py3-wheel || true
+            # QEMU needs Python >= 3.12; OpenBSD 7.6's default python3 is 3.11
+            $SUDO pkg_add -I bash bison bzip2 dtc git glib2 gmake gsed libffi meson ninja pkgconf python%3.12
             export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/X11R6/lib/pkgconfig
             mkdir build && cd build
-            ../configure --cc=cc \
+            ../configure --cc=cc --python=/usr/local/bin/python3.12 \
               --extra-cflags="-I/usr/local/include -I/usr/X11R6/include" \
               --extra-ldflags="-L/usr/local/lib -L/usr/X11R6/lib" \
               --target-list=ppc64-softmmu \
