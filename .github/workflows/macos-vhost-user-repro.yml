@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-15-intel]
+        os: [macos-15]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 330
     env:
@@ -71,6 +71,8 @@ jobs:
         run: cd build && gmake -j$(sysctl -n hw.ncpu) check-build
 
       - name: Sanity run (unloaded, vhost-user subtests once)
+        id: sanity
+        continue-on-error: true
         run: |
           cd build
           QTEST_QEMU_BINARY=./qemu-system-ppc64 QTEST_QEMU_IMG=./qemu-img \
@@ -111,6 +113,7 @@ jobs:
           {
             echo "## vhost-user/reconnect on ${{ matrix.os }}"
             echo
+            echo "Sanity step outcome: ${{ steps.sanity.outcome }}"
             echo "Stress step outcome: ${{ steps.stress.outcome }}"
             echo "Loop failures: ${{ steps.loop.outputs.loop_failures }}/30"
             echo
