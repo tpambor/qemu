@@ -36,6 +36,7 @@
 #include "trace.h"
 
 #include "chardev/char-io.h"
+#include "chardev/char-fe.h"
 #include "chardev/char-socket.h"
 
 static gboolean socket_reconnect_timeout(gpointer opaque);
@@ -645,7 +646,7 @@ static void update_ioc_handlers(SocketChardev *s)
          * unnoticed until an unrelated event wakes the main loop.  Ask
          * for readability too in that case; tcp_chr_hup checks for EOF.
          */
-        if (!chr->be || !chr->be->chr_can_read) {
+        if (!chr->fe || !chr->fe->chr_can_read) {
             hup_cond |= G_IO_IN;
         }
 #endif
