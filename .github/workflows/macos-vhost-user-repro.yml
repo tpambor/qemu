@@ -372,7 +372,10 @@ jobs:
             echo "== all qos tests (no arguments)"
             ./tests/qtest/qos-test 2>&1 | tee ../openbsd-logs/virtio.log || true
             echo "== stress run"
-            gmake -j6 check-qtest-ppc64 MTESTARGS="--repeat 5 $PPC64_TESTS" 2>&1 | tee ../openbsd-logs/stress.log || true
+            # OpenBSD does not overcommit memory: six parallel qtests (each
+            # QEMU maps 512 MiB of guest RAM plus its TCG buffer) exhaust the
+            # 12G VM with ENOMEM, so run three at a time.
+            gmake -j3 check-qtest-ppc64 MTESTARGS="--repeat 5 $PPC64_TESTS" 2>&1 | tee ../openbsd-logs/stress.log || true
             echo "== reconnect loop under CPU load"
             hogs=""
             for i in $(seq 1 $((NCPU * 2))); do yes > /dev/null & hogs="$hogs $!"; done
