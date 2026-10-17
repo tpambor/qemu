@@ -1504,6 +1504,131 @@ vu_check_queue_inflights(VuDev *dev, VuVirtq *vq)
     return 0;
 }
 
+/*
+ * Notifier the library owns for kicking itself.  Writing to the kick fd
+ * the front-end hands over is not portable (on hosts without eventfd it is
+ * the read end of the front-end's pipe), so use our own eventfd or pipe
+ * and watch its read end through the embedder's set_watch(), like a kick
+ * fd.  Handlers then run from the event loop, after the reply to the
+ * message that scheduled them has been sent, exactly as on a real kick.
+ */
+static bool
+vu_self_kick_init(VuDev *dev)
+{
+#ifdef CONFIG_EVENTFD
+    int fd = eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
+
+    if (fd < 0) {
+        return false;
+    }
+    dev->self_kick_rfd = dev->self_kick_wfd = fd;
+#else
+    int fds[2], i;
+
+    if (pipe(fds) < 0) {
+        return false;
+    }
+    for (i = 0; i < 2; i++) {
+        if (fcntl(fds[i], F_SETFL, fcntl(fds[i], F_GETFL) | O_NONBLOCK) < 0 ||
+            fcntl(fds[i], F_SETFD, FD_CLOEXEC) < 0) {
+            close(fds[0]);
+            close(fds[1]);
+            return false;
+        }
+    }
+    dev->self_kick_rfd = fds[0];
+    dev->self_kick_wfd = fds[1];
+#endif
+    return true;
+}
+
+static void
+vu_self_kick_deinit(VuDev *dev)
+{
+    if (dev->self_kick_watched) {
+        dev->remove_watch(dev, dev->self_kick_rfd);
+        dev->self_kick_watched = false;
+    }
+    if (dev->self_kick_wfd != -1 && dev->self_kick_wfd != dev->self_kick_rfd) {
+        close(dev->self_kick_wfd);
+    }
+    if (dev->self_kick_rfd != -1) {
+        close(dev->self_kick_rfd);
+    }
+    dev->self_kick_rfd = dev->self_kick_wfd = -1;
+}
+
+static void
+vu_self_kick_cb(VuDev *dev, int condition, void *data)
+{
+    char buf[64];
+    unsigned int i;
+
+    /* drain: one 8-byte counter for an eventfd, 8 bytes per kick for a pipe */
+    while (read(dev->self_kick_rfd, buf, sizeof(buf)) > 0) {
+        continue;
+    }
+
+    for (i = 0; i < dev->max_queues; i++) {
+        VuVirtq *vq = &dev->vq[i];
+
+        if (!vq->kick_pending) {
+            continue;
+        }
+        vq->kick_pending = false;
+        DPRINT("Running handler for pending requests on vq: %u\n", i);
+        if (vq->handler) {
+            vq->handler(dev, i);
+        }
+    }
+}
+
+/*
+ * A ring (re)starts with VHOST_USER_SET_VRING_KICK and the back-end resumes
+ * processing it right away.  The ring may already hold requests: ones the
+ * driver queued while the back-end was away (after a crash or restart they
+ * are only ever kicked once, and that kick went to the old instance) and
+ * ones the previous instance left in flight (resubmit_list, from the
+ * inflight region).  Front-ends SHOULD send a kick after SET_VRING_KICK
+ * but back-ends SHOULD NOT rely on it, so schedule the queue handler
+ * ourselves through the library's own notifier.
+ */
+static void
+vu_schedule_pending_requests(VuDev *dev, int index)
+{
+    VuVirtq *vq = &dev->vq[index];
+    uint64_t one = 1;
+    ssize_t ret;
+
+    if (!vq->handler) {
+        return;
+    }
+
+    if (vq->resubmit_num == 0 && vu_queue_empty(dev, vq)) {
+        return;
+    }
+
+    DPRINT("Scheduling pending requests on vq: %d (resubmit: %d)\n",
+           index, vq->resubmit_num);
+    vq->kick_pending = true;
+
+    if (!dev->self_kick_watched) {
+        dev->set_watch(dev, dev->self_kick_rfd, VU_WATCH_IN,
+                       vu_self_kick_cb, NULL);
+        dev->self_kick_watched = true;
+    }
+
+    do {
+        ret = write(dev->self_kick_wfd, &one, sizeof(one));
+    } while (ret < 0 && errno == EINTR);
+
+    /* EAGAIN: the notifier is already pending, which is all we need */
+    if (ret < 0 && errno != EAGAIN) {
+        vu_panic(dev, "Failed to kick ourselves for vq: %d: %s\n",
+                 index, strerror(errno));
+    }
+}
+
 static bool
 vu_set_vring_kick_exec(VuDev *dev, VhostUserMsg *vmsg)
 {
@@ -1542,29 +1667,7 @@ vu_set_vring_kick_exec(VuDev *dev, VhostUserMsg *vmsg)
         vu_panic(dev, "Failed to check inflights for vq: %d\n", index);
     }
 
-    /* Inject a kick to look for available vq buffers */
-    if (dev->vq[index].kick_fd != -1) {
-        int ret;
-
-        do {
-            ret = eventfd_write(dev->vq[index].kick_fd, 1);
-        } while (ret != 0 && errno == EINTR);
-
-        if (ret != 0 && errno == EBADF) {
-            /*
-             * Local experiment (not for upstream): on hosts without
-             * eventfd the kick fd is the read end of the front-end's
-             * pipe (FreeBSD pipes happen to be bidirectional, macOS
-             * pipes are not), so the back-end cannot write to it.  The
-             * front-end injects its own kick in that case; just wait
-             * for it.
-             */
-            DPRINT("Cannot inject kick on vq: %d (fd not writable)\n", index);
-        } else if (ret != 0 && errno != EAGAIN /* already readable */) {
-            vu_panic(dev, "Failed to inject kick during SET_VRING_KICK "
-                     "on vq: %d with error: %s\n", index, strerror(errno));
-        }
-    }
+    vu_schedule_pending_requests(dev, index);
 
     return false;
 }
@@ -2453,6 +2556,7 @@ vu_deinit(VuDev *dev)
     }
 
     vu_close_log(dev);
+    vu_self_kick_deinit(dev);
     if (dev->backend_fd != -1) {
         close(dev->backend_fd);
         dev->backend_fd = -1;
@@ -2500,10 +2604,17 @@ vu_init(VuDev *dev,
     pthread_mutex_init(&dev->backend_mutex, NULL);
     dev->backend_fd = -1;
     dev->max_queues = max_queues;
+    dev->self_kick_rfd = dev->self_kick_wfd = -1;
+
+    if (!vu_self_kick_init(dev)) {
+        DPRINT("%s: failed to create the self-kick notifier\n", __func__);
+        return false;
+    }
 
     dev->regions = malloc(VHOST_USER_MAX_RAM_SLOTS * sizeof(dev->regions[0]));
     if (!dev->regions) {
         DPRINT("%s: failed to malloc mem regions\n", __func__);
+        vu_self_kick_deinit(dev);
         return false;
     }
 
@@ -2512,6 +2623,7 @@ vu_init(VuDev *dev,
         DPRINT("%s: failed to malloc virtqueues\n", __func__);
         free(dev->regions);
         dev->regions = NULL;
+        vu_self_kick_deinit(dev);
         return false;
     }
 
