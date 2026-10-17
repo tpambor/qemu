@@ -485,7 +485,7 @@ jobs:
           install/bin/qemu-system-x86_64 --version
           install/bin/qemu-storage-daemon --version
           install/bin/qemu-img --version
-          install/bin/qemu-system-x86_64 -machine help | head -3
+          install/bin/qemu-system-x86_64 -machine help | grep -E '^(q35|pc|microvm) '
           install/bin/qemu-system-x86_64 -device help | grep -E 'vhost-user-(net|blk)' || true
           install/bin/qemu-storage-daemon --export help 2>&1 | head -5 || true
 
