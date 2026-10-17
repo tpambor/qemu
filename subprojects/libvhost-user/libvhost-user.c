@@ -23,6 +23,7 @@
 #include <unistd.h>
 #include <stdarg.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <string.h>
 #include <assert.h>
 #include <inttypes.h>
@@ -85,8 +86,6 @@ int eventfd_read(int fd, eventfd_t *value)
 #endif
 
 #ifdef CONFIG_MEMFD
-#include <fcntl.h>
-
 #ifndef F_LINUX_SPECIFIC_BASE
 #define F_LINUX_SPECIFIC_BASE 1024
 #endif
