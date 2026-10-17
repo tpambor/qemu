@@ -11,10 +11,21 @@ add_project_arguments(cc.get_supported_arguments('-Wsign-compare',
 threads = dependency('threads')
 glib = dependency('glib-2.0')
 
+vhost_user_c_args = ['-D_GNU_SOURCE']
+# memfd_create(2) is Linux-only.  Check that it links rather than trusting
+# MFD_ALLOW_SEALING: emscripten's libc declares it without providing it.
+if cc.links('''
+    #define _GNU_SOURCE
+    #include <sys/mman.h>
+    int main(void) { return memfd_create("foo", MFD_ALLOW_SEALING); }
+  ''', name: 'memfd_create')
+  vhost_user_c_args += '-DHAVE_MEMFD_CREATE'
+endif
+
 vhost_user = static_library('vhost-user',
                             files('libvhost-user.c'),
                             dependencies: threads,
-                            c_args: '-D_GNU_SOURCE')
+                            c_args: vhost_user_c_args)
 
 executable('link-test', files('link-test.c'),
            link_whole: vhost_user)
