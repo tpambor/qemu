@@ -1523,23 +1523,10 @@ static int vhost_user_set_vring_kick(struct vhost_dev *dev,
     }
 
     /*
-     * Inject a kick in case the back-end only starts vring processing upon
-     * receiving a kick. The spec suggests this to improve compatibility.
-     *
-     * Local experiment (not for upstream): file->fd is the notifier's
-     * read side.  With eventfd that is also writable, but on hosts where
-     * event notifiers are pipes (macOS; FreeBSD only gets away with it
-     * because its pipes are bidirectional) writing to it fails with
-     * EBADF and vhost-net falls back to userspace virtio.  Kick through
-     * the notifier instead, which writes to the correct end.
+     * Experiment (not for upstream): the kick the spec suggests injecting
+     * here for back-ends that only start processing upon a kick is left
+     * out, so that the back-end has to find pending requests by itself.
      */
-    if (file->fd != -1) {
-        /* vhost_user_get_vq_index() returns the absolute queue index */
-        VirtQueue *vq = virtio_get_queue(dev->vdev, file->index);
-
-        return event_notifier_set(virtio_queue_get_host_notifier(vq));
-    }
-
     return 0;
 }
 
