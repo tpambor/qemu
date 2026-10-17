@@ -78,6 +78,14 @@ jobs:
           QTEST_QEMU_BINARY=./qemu-system-ppc64 QTEST_QEMU_IMG=./qemu-img \
             ./tests/qtest/qos-test -p ${RECONNECT%/reconnect}
 
+      - name: Diagnostic run (migrate subtest with vhost-user and chardev tracing)
+        continue-on-error: true
+        run: |
+          cd build
+          QTEST_QEMU_BINARY="./qemu-system-ppc64 -trace vhost_user_* -trace chr_socket_*" \
+          QTEST_QEMU_IMG=./qemu-img \
+            ./tests/qtest/qos-test -p ${RECONNECT%/reconnect}/migrate 2>&1 | tee ../diag.log
+
       - name: Stress run (six qtests in parallel, five repetitions)
         id: stress
         continue-on-error: true
@@ -126,6 +134,16 @@ jobs:
             echo '```'
             grep -h -E 'vhost-user/reconnect|^Ok:|^Fail:|^Timeout:|Summary of Failures|qos-test +(OK|ERROR|FAIL|TIMEOUT)' stress.log 2>/dev/null || true
             echo '```'
+            echo
+            echo "### Diagnostic run (first 80 lines)"
+            echo '```'
+            head -80 diag.log 2>/dev/null || true
+            echo '```'
+            echo
+            echo "### Loop iteration 1 (first 60 lines)"
+            echo '```'
+            head -60 loop-1.log 2>/dev/null || true
+            echo '```'
           } | tee -a "$GITHUB_STEP_SUMMARY"
           grep -rl 'wait_for_fds: assertion failed' stress.log loop-*.log build/meson-logs 2>/dev/null || true
 
@@ -136,6 +154,7 @@ jobs:
           name: logs-${{ matrix.os }}
           path: |
             stress.log
+            diag.log
             loop-*.log
             build/meson-logs/
             build/config.log
