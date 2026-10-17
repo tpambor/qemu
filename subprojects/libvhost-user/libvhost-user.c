@@ -1540,9 +1540,19 @@ vu_set_vring_kick_exec(VuDev *dev, VhostUserMsg *vmsg)
             ret = eventfd_write(dev->vq[index].kick_fd, 1);
         } while (ret != 0 && errno == EINTR);
 
-        if (ret != 0 && errno != EAGAIN /* already readable */) {
+        if (ret != 0 && errno == EBADF) {
+            /*
+             * Local experiment (not for upstream): on hosts without
+             * eventfd the kick fd is the read end of the front-end's
+             * pipe (FreeBSD pipes happen to be bidirectional, macOS
+             * pipes are not), so the back-end cannot write to it.  The
+             * front-end injects its own kick in that case; just wait
+             * for it.
+             */
+            DPRINT("Cannot inject kick on vq: %d (fd not writable)\n", index);
+        } else if (ret != 0 && errno != EAGAIN /* already readable */) {
             vu_panic(dev, "Failed to inject kick during SET_VRING_KICK "
-                     "on vq: %d with error: %m\n", index);
+                     "on vq: %d with error: %s\n", index, strerror(errno));
         }
     }
 
