@@ -518,3 +518,224 @@ jobs:
           name: qemu-macos-arm64-x86_64-softmmu
           path: qemu-macos-arm64-*.tar.gz
           if-no-files-found: error
+
+  # Functional test on every host: build x86_64-softmmu with the tools and
+  # the storage daemon, then run .github/workflows/vhost-user-blk-boot.sh,
+  # which exports a Fedora cloud image over vhost-user-blk with
+  # qemu-storage-daemon and boots it with qemu-system-x86_64 (TCG).
+  functional:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install bash coreutils dtc gettext glib gnu-sed make meson ninja pixman pkgconf python3 zstd
+
+      - name: Install dependencies (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git ninja-build pkg-config python3 python3-venv \
+            libglib2.0-dev libpixman-1-dev libfdt-dev zlib1g-dev genisoimage
+
+      - name: Configure and build
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            NCPU=$(sysctl -n hw.ncpu); MAKE=gmake
+            prefix=$(brew --prefix)
+            extra="--extra-cflags=-I$prefix/include --extra-ldflags=-L$prefix/lib"
+          else
+            NCPU=$(nproc); MAKE=make; extra=""
+          fi
+          mkdir build && cd build
+          ../configure $extra \
+            --target-list=x86_64-softmmu \
+            --enable-vhost-user \
+            --enable-vhost-user-blk-server \
+            --enable-tools \
+            --disable-docs \
+            --disable-rust \
+            --disable-plugins \
+            --disable-werror \
+            || { cat config.log meson-logs/meson-log.txt; exit 1; }
+          $MAKE -j$NCPU
+
+      - name: Boot Fedora over vhost-user-blk
+        timeout-minutes: 60
+        run: bash .github/workflows/vhost-user-blk-boot.sh "$PWD/build" "$PWD/functional-logs"
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "## Fedora 44 over vhost-user-blk on ${{ matrix.os }} (TCG)"
+            echo '```'
+            cat functional-logs/summary.txt 2>/dev/null || echo "no summary (test did not run to completion)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional-logs-${{ matrix.os }}
+          path: |
+            functional-logs/serial.log
+            functional-logs/qemu.log
+            functional-logs/qsd.log
+            functional-logs/summary.txt
+          if-no-files-found: ignore
+
+  functional-freebsd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and boot inside a FreeBSD VM
+        id: vm
+        continue-on-error: true
+        uses: cross-platform-actions/action@v0.28.0
+        with:
+          operating_system: freebsd
+          version: '14.2'
+          architecture: x86-64
+          cpu_count: 4
+          memory: 12G
+          shell: bash
+          sync_files: true
+          run: |
+            set -o pipefail
+            NCPU=$(sysctl -n hw.ncpu)
+            uname -a; freebsd-version; echo "cpus: $NCPU"; df -h /
+            sudo pkg install -y bash coreutils curl dtc gettext git glib gmake gnutls gsed meson ninja pixman pkgconf python3 zstd
+            PYVER=$(python3 -c 'import sys; print("%d%d" % sys.version_info[:2])')
+            sudo pkg install -y py${PYVER}-setuptools py${PYVER}-wheel py${PYVER}-tomli || true
+            mkdir build && cd build
+            ../configure \
+              --extra-cflags=-I/usr/local/include \
+              --extra-ldflags=-L/usr/local/lib \
+              --target-list=x86_64-softmmu \
+              --enable-vhost-user \
+              --enable-vhost-user-blk-server \
+              --enable-tools \
+              --disable-docs \
+              --disable-rust \
+              --disable-plugins \
+              --disable-werror \
+              || { cat config.log meson-logs/meson-log.txt; exit 1; }
+            gmake -j$NCPU
+            cd ..
+            rc=0
+            bash .github/workflows/vhost-user-blk-boot.sh "$PWD/build" "$PWD/functional-logs" || rc=$?
+            # keep the sync back to the runner small
+            rm -rf build functional-logs/seed functional-logs/seed.iso functional-logs/*.qcow2
+            exit $rc
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "## Fedora 44 over vhost-user-blk on FreeBSD 14.2 (VM on ${{ runner.os }}, TCG)"
+            echo "VM step outcome: ${{ steps.vm.outcome }}"
+            echo '```'
+            cat functional-logs/summary.txt 2>/dev/null || echo "no summary (test did not run to completion)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional-logs-freebsd-14.2
+          path: |
+            functional-logs/serial.log
+            functional-logs/qemu.log
+            functional-logs/qsd.log
+            functional-logs/summary.txt
+          if-no-files-found: ignore
+
+      - name: Result
+        run: test "${{ steps.vm.outcome }}" = success
+
+  functional-openbsd:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and boot inside an OpenBSD VM
+        id: vm
+        continue-on-error: true
+        uses: cross-platform-actions/action@v0.28.0
+        with:
+          operating_system: openbsd
+          version: '7.7'
+          architecture: x86-64
+          cpu_count: 4
+          memory: 12G
+          shell: bash
+          sync_files: true
+          run: |
+            set -o pipefail
+            NCPU=$(sysctl -n hw.ncpu)
+            uname -a; echo "cpus: $NCPU"; df -h /
+            SUDO=sudo; command -v sudo >/dev/null 2>&1 || SUDO=doas
+            # cdrtools (mkisofs) for the seed ISO; mkhybrid from base is the fallback
+            $SUDO pkg_add -I bash bison bzip2 cdrtools curl dtc git glib2 gmake gsed libffi meson ninja pkgconf python3
+            export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/X11R6/lib/pkgconfig
+            mkdir build && cd build
+            ../configure --cc=cc --python=/usr/local/bin/python3 \
+              --extra-cflags="-I/usr/local/include -I/usr/X11R6/include" \
+              --extra-ldflags="-L/usr/local/lib -L/usr/X11R6/lib" \
+              --target-list=x86_64-softmmu \
+              --enable-vhost-user \
+              --enable-vhost-user-blk-server \
+              --enable-tools \
+              --disable-docs \
+              --disable-rust \
+              --disable-plugins \
+              --disable-werror \
+              || { cat config.log meson-logs/meson-log.txt; exit 1; }
+            gmake -j$NCPU
+            cd ..
+            rc=0
+            bash .github/workflows/vhost-user-blk-boot.sh "$PWD/build" "$PWD/functional-logs" || rc=$?
+            # keep the sync back to the runner small
+            rm -rf build functional-logs/seed functional-logs/seed.iso functional-logs/*.qcow2
+            exit $rc
+
+      - name: Report
+        if: always()
+        run: |
+          {
+            echo "## Fedora 44 over vhost-user-blk on OpenBSD 7.7 (VM on ${{ runner.os }}, TCG)"
+            echo "VM step outcome: ${{ steps.vm.outcome }}"
+            echo '```'
+            cat functional-logs/summary.txt 2>/dev/null || echo "no summary (test did not run to completion)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional-logs-openbsd-7.7
+          path: |
+            functional-logs/serial.log
+            functional-logs/qemu.log
+            functional-logs/qsd.log
+            functional-logs/summary.txt
+          if-no-files-found: ignore
+
+      - name: Result
+        run: test "${{ steps.vm.outcome }}" = success
